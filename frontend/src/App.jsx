@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import './App.css';
 
-const API_BASE_URL = 'http://localhost:5000/api/applications';
+const API_BASE_URL = 'https://careertrack-backend-s94d.onrender.com/api/applications';
 
 function App() {
   const [applications, setApplications] = useState([]);
