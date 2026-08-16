@@ -11,8 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const uri = process.env.MONGO_URI || "mongodb+srv://careertrack_admin:Piramanayagam%401508@careertrack.qzdslfa.mongodb.net/?appName=CareerTrack";
-
+const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
     serverApi: {
         version: ServerApiVersion.v1,
@@ -34,8 +33,17 @@ async function startServer() {
 
         console.log("MongoDB connected successfully!");
 
-        app.listen(5000, () => {
-            console.log("Server running on http://localhost:5000");
+        app.get("/api/test", (req, res) => {
+            res.json({
+                success: true,
+                message: "Backend connected successfully!"
+            });
+        });
+
+        const PORT = process.env.PORT || 5000;
+
+        app.listen(PORT, () => {
+            console.log(`Server running on port ${PORT}`);
         });
     } catch (error) {
         console.error("MongoDB connection failed:", error.message);
