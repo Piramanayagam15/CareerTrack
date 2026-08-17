@@ -1,18 +1,42 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import './App.css';
 
-const API_BASE_URL = 'https://careertrack-backend-s94d.onrender.com/api/applications';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (
+  typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? 'http://careertrack-backend-env.eba-m38ryfhh.eu-north-1.elasticbeanstalk.com/api'
+    : 'https://careertrack-backend-s94d.onrender.com/api'
+);
 
 function App() {
   const [applications, setApplications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [serverOnline, setServerOnline] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [toast, setToast] = useState(null);
 
-  // Form State
+  // Auth State
+  const [token, setToken] = useState(() => localStorage.getItem('careertrack_token') || '');
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem('careertrack_user');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [authForm, setAuthForm] = useState({
+    name: '',
+    email: '',
+    password: ''
+  });
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Application Form State
   const [formData, setFormData] = useState({
     company: '',
     role: '',
@@ -28,13 +52,37 @@ function App() {
   };
 
   // Fetch applications from backend
-  const fetchApplications = async () => {
+  const fetchApplications = useCallback(async (authToken = token) => {
+    if (!authToken) {
+      setLoading(false);
+      setApplications([]);
+      return;
+    }
+
     try {
       setLoading(true);
-      const res = await fetch(API_BASE_URL);
-      if (!res.ok) throw new Error('Network response was not ok');
+      const res = await fetch(`${API_BASE_URL}/applications`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`
+        }
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        // Token invalid or expired
+        localStorage.removeItem('careertrack_token');
+        localStorage.removeItem('careertrack_user');
+        setToken('');
+        setUser(null);
+        setApplications([]);
+        showToast('Session expired. Please log in again.', 'error');
+        setServerOnline(true);
+        return;
+      }
+
+      if (!res.ok) throw new Error('Failed to load applications');
+
       const data = await res.json();
-      setApplications(data);
+      setApplications(Array.isArray(data) ? data : []);
       setServerOnline(true);
     } catch (err) {
       console.error('Error fetching applications:', err);
@@ -42,13 +90,22 @@ function App() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
 
+  // Check server health and fetch applications on mount
   useEffect(() => {
-    fetchApplications();
-    const interval = setInterval(fetchApplications, 15000);
-    return () => clearInterval(interval);
-  }, []);
+    fetch(`${API_BASE_URL.replace('/api', '')}/api/test`)
+      .then((res) => {
+        if (res.ok) setServerOnline(true);
+      })
+      .catch(() => setServerOnline(false));
+
+    if (token) {
+      fetchApplications(token);
+    } else {
+      setLoading(false);
+    }
+  }, [token, fetchApplications]);
 
   // Handle Form Input Change
   const handleInputChange = (e) => {
@@ -56,25 +113,98 @@ function App() {
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
+  const handleAuthInputChange = (e) => {
+    const { name, value } = e.target;
+    setAuthForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  // User Signup / Login
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthLoading(true);
+
+    const endpoint = authMode === 'signup' ? `${API_BASE_URL}/auth/signup` : `${API_BASE_URL}/auth/login`;
+    const payload = authMode === 'signup'
+      ? { name: authForm.name, email: authForm.email, password: authForm.password }
+      : { email: authForm.email, password: authForm.password };
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.message || 'Authentication failed');
+      }
+
+      const newToken = data.token;
+      const userData = data.user || { email: authForm.email, name: authForm.name || 'User' };
+
+      localStorage.setItem('careertrack_token', newToken);
+      localStorage.setItem('careertrack_user', JSON.stringify(userData));
+
+      setToken(newToken);
+      setUser(userData);
+      setIsAuthModalOpen(false);
+      setAuthForm({ name: '', email: '', password: '' });
+      setServerOnline(true);
+
+      showToast(authMode === 'signup' ? 'Account created! Welcome to CareerTrack 🎉' : 'Logged in successfully! 🚀');
+      fetchApplications(newToken);
+    } catch (err) {
+      console.error('Auth error:', err);
+      showToast(err.message || 'Authentication error', 'error');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  // Logout
+  const handleLogout = () => {
+    localStorage.removeItem('careertrack_token');
+    localStorage.removeItem('careertrack_user');
+    setToken('');
+    setUser(null);
+    setApplications([]);
+    showToast('Logged out successfully');
+  };
+
   // Create Application (POST)
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (!token) {
+      setIsModalOpen(false);
+      setIsAuthModalOpen(true);
+      showToast('Please sign in or create an account to save applications', 'error');
+      return;
+    }
+
     if (!formData.company.trim() || !formData.role.trim()) {
       showToast('Company and Role are required', 'error');
       return;
     }
 
     try {
-      const res = await fetch(API_BASE_URL, {
+      const res = await fetch(`${API_BASE_URL}/applications`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify(formData),
       });
 
-      if (!res.ok) throw new Error('Failed to create application');
-
       const savedData = await res.json();
-      setApplications((prev) => [savedData.application || { ...formData, _id: savedData.id, createdAt: new Date() }, ...prev]);
+
+      if (!res.ok) throw new Error(savedData.message || 'Failed to create application');
+
+      const newApp = savedData.application || { ...formData, _id: savedData.id, createdAt: new Date() };
+      setApplications((prev) => [newApp, ...prev]);
       setIsModalOpen(false);
       setFormData({
         company: '',
@@ -87,16 +217,24 @@ function App() {
       showToast('Application added successfully! 🎉');
     } catch (err) {
       console.error('Error adding application:', err);
-      showToast('Failed to add application. Check backend server.', 'error');
+      showToast(err.message || 'Failed to add application. Check backend server.', 'error');
     }
   };
 
   // Update Status (PATCH)
   const handleStatusChange = async (id, newStatus) => {
+    if (!token) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     try {
-      const res = await fetch(`${API_BASE_URL}/${id}`, {
+      const res = await fetch(`${API_BASE_URL}/applications/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({ status: newStatus }),
       });
 
@@ -114,11 +252,19 @@ function App() {
 
   // Delete Application (DELETE)
   const handleDelete = async (id, company) => {
+    if (!token) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
     if (!window.confirm(`Are you sure you want to delete the application for ${company}?`)) return;
 
     try {
-      const res = await fetch(`${API_BASE_URL}/${id}`, {
+      const res = await fetch(`${API_BASE_URL}/applications/${id}`, {
         method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
 
       if (!res.ok) throw new Error('Failed to delete application');
@@ -143,8 +289,8 @@ function App() {
   // Filter & Search Logic
   const filteredApplications = applications.filter((app) => {
     const matchesSearch =
-      app.company?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      app.role?.toLowerCase().includes(searchTerm.toLowerCase());
+      (app.company || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (app.role || '').toLowerCase().includes(searchTerm.toLowerCase());
 
     if (statusFilter === 'All') return matchesSearch;
     if (statusFilter === 'Interview') return matchesSearch && (app.status === 'Interview' || app.status === 'Interviewing');
@@ -170,7 +316,31 @@ function App() {
             {serverOnline ? 'Backend Connected' : 'Connecting to Server...'}
           </div>
 
-          <button id="add-application-btn" className="btn-primary" onClick={() => setIsModalOpen(true)}>
+          {user ? (
+            <div className="user-profile-badge">
+              <div className="user-avatar">{user.name ? user.name.charAt(0).toUpperCase() : 'U'}</div>
+              <span className="user-name">{user.name || user.email}</span>
+              <button className="btn-logout" onClick={handleLogout} title="Log Out">
+                Log Out
+              </button>
+            </div>
+          ) : (
+            <button className="btn-secondary auth-btn" onClick={() => { setAuthMode('login'); setIsAuthModalOpen(true); }}>
+              Sign In / Register
+            </button>
+          )}
+
+          <button
+            id="add-application-btn"
+            className="btn-primary"
+            onClick={() => {
+              if (!token) {
+                setIsAuthModalOpen(true);
+              } else {
+                setIsModalOpen(true);
+              }
+            }}
+          >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -179,6 +349,21 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* Guest Banner if not logged in */}
+      {!token && (
+        <div className="guest-banner">
+          <div className="guest-banner-content">
+            <span className="guest-banner-icon">🔒</span>
+            <div>
+              <strong>Secure Cloud Sync:</strong> Sign in or create a free account to track and save your job applications securely in MongoDB.
+            </div>
+          </div>
+          <button className="btn-primary banner-action-btn" onClick={() => { setAuthMode('signup'); setIsAuthModalOpen(true); }}>
+            Get Started Free
+          </button>
+        </div>
+      )}
 
       {/* Stats Summary Grid */}
       <section className="stats-grid">
@@ -250,6 +435,22 @@ function App() {
         <div className="loading-container">
           <div className="spinner"></div>
           <p>Loading applications from MongoDB...</p>
+        </div>
+      ) : !token ? (
+        <div className="empty-state auth-prompt-state">
+          <div className="empty-icon">🔐</div>
+          <h2 className="empty-title">Sign In to View Your Applications</h2>
+          <p className="empty-desc">
+            Your job applications are securely linked to your account. Log in or create a free account to view and manage your pipeline.
+          </p>
+          <div className="empty-actions">
+            <button className="btn-primary" onClick={() => { setAuthMode('login'); setIsAuthModalOpen(true); }}>
+              Sign In
+            </button>
+            <button className="btn-secondary" onClick={() => { setAuthMode('signup'); setIsAuthModalOpen(true); }}>
+              Create Free Account
+            </button>
+          </div>
         </div>
       ) : filteredApplications.length === 0 ? (
         <div className="empty-state">
@@ -453,6 +654,105 @@ function App() {
                 </button>
                 <button type="submit" className="btn-primary">
                   Save Application
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Auth Modal (Login / Sign Up) */}
+      {isAuthModalOpen && (
+        <div className="modal-overlay" onClick={() => setIsAuthModalOpen(false)}>
+          <div className="modal-content auth-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">
+                {authMode === 'signup' ? 'Create an Account' : 'Welcome Back'}
+              </h2>
+              <button className="modal-close" onClick={() => setIsAuthModalOpen(false)}>✕</button>
+            </div>
+
+            <div className="auth-tab-switcher">
+              <button
+                type="button"
+                className={`auth-tab ${authMode === 'login' ? 'active' : ''}`}
+                onClick={() => setAuthMode('login')}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                className={`auth-tab ${authMode === 'signup' ? 'active' : ''}`}
+                onClick={() => setAuthMode('signup')}
+              >
+                Create Account
+              </button>
+            </div>
+
+            <form onSubmit={handleAuthSubmit}>
+              <div className="modal-body">
+                {authMode === 'signup' && (
+                  <div className="form-group">
+                    <label className="form-label">Full Name *</label>
+                    <input
+                      type="text"
+                      name="name"
+                      className="form-input"
+                      placeholder="e.g. Alex Johnson"
+                      value={authForm.name}
+                      onChange={handleAuthInputChange}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label className="form-label">Email Address *</label>
+                  <input
+                    type="email"
+                    name="email"
+                    className="form-input"
+                    placeholder="name@example.com"
+                    value={authForm.email}
+                    onChange={handleAuthInputChange}
+                    required
+                    autoFocus={authMode === 'login'}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Password *</label>
+                  <input
+                    type="password"
+                    name="password"
+                    className="form-input"
+                    placeholder="••••••••"
+                    minLength={6}
+                    value={authForm.password}
+                    onChange={handleAuthInputChange}
+                    required
+                  />
+                  {authMode === 'signup' && (
+                    <span className="form-hint">At least 6 characters</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="modal-footer auth-modal-footer">
+                <p className="auth-switch-text">
+                  {authMode === 'login' ? "Don't have an account? " : "Already have an account? "}
+                  <button
+                    type="button"
+                    className="auth-link-btn"
+                    onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+                  >
+                    {authMode === 'login' ? 'Sign Up' : 'Log In'}
+                  </button>
+                </p>
+
+                <button type="submit" className="btn-primary" disabled={authLoading}>
+                  {authLoading ? 'Please wait...' : authMode === 'signup' ? 'Create Account' : 'Sign In'}
                 </button>
               </div>
             </form>
